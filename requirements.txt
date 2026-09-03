@@ -1,11 +1,8 @@
-# Validated stack (July 2026): diffusers 0.38.0, python 3.12, torch 2.8 (cu12x).
-# Install torch separately for your CUDA, e.g.:
-#   pip install torch==2.8.0 --index-url https://download.pytorch.org/whl/cu128
-#
-# huggingface_hub MUST stay <1.0: transformers (<=4.57) pins it, and a hub >=1.0
-# in the environment breaks `import transformers`. diffusers 0.38 works with 0.36.x.
+# Physical training is validated with the local `omini` environment:
+# Python 3.10, torch 2.5.1+cu121, diffusers 0.37.1, Lightning 2.6.1.
+# Install torch separately for the target CUDA runtime.
 transformers>=4.55,<5
-diffusers==0.38.0
+diffusers==0.37.1
 huggingface_hub<1.0
 peft
 opencv-python
@@ -14,3 +11,12 @@ sentencepiece
 gradio
 jupyter
 torchao
+
+# Validation stack. Versions below match the existing OminiControl evaluator.
+torchmetrics==0.7.0
+lpips==0.1.4
+clean-fid==0.1.35
+pytorch-msssim
+lightning
+pyyaml
+prodigyopt

@@ -1,0 +1,32 @@
+model:
+  in_channels: 64
+  out_channels: 64
+  hidden_size: 768
+  num_attention_heads: 12
+  attention_head_dim: 64
+  num_layers: 33
+  mlp_ratio: 4.0
+  axes_dims_rope: [16, 24, 24]
+  theta: 10000
+
+wavelet:
+  source_range: "[-1, 1]"
+  coefficient_order: [LL, HL, LH, HH]
+  ll_preprocess: "(ll + 2) / 4"
+  ll_postprocess: "4 * ll - 2"
+
+hfrm:
+  in_channels_ll: 3
+  in_channels_hf: 9
+  base_dim: 96
+
+flow_matching:
+  time_sampling: logistic_normal
+  target: x_1_minus_x_0
+
+validation:
+  metrics: [psnr, ssim, lpips, fid_clean]
+  fid_reference:
+    flir: source
+    kaist: source
+    m3fd: source_resized

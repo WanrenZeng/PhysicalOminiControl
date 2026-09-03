@@ -1,0 +1,60 @@
+vae:
+  path: /root/.cache/huggingface/hub/models--black-forest-labs--FLUX.1-dev/snapshots/3de623fc3c33e44ffbe2bad470d0f45bccf2eb21
+  sample_posterior: false
+
+model: {}
+
+hfrm:
+  base_dim: 96
+  pretrained_path: /root/zengpeiyi/work_base/OminiControl-main/runs_hfrm/wavelet_hfrm_channel_ll_l1msssim_kaist_noise/20260530-154646/ckpt/19800/hfrm.pth
+
+hfrm_loss:
+  high_frequency_weight: 0.5
+  pixel_weight: 1.0
+  ms_ssim_weight: 0.0
+
+dataset:
+  name: kaist
+  root: /root/zengpeiyi/work_base/dataset/KAIST_clean
+  train_annotations: /root/zengpeiyi/work_base/dataset/KAIST_clean/train_set.json
+  validation_annotations: /root/zengpeiyi/work_base/dataset/KAIST_clean/test_set.json
+  horizontal_flip_prob: 0.5
+  train_num_samples: null
+  validation_num_samples: null
+
+train:
+  stage: hfrm
+  output_dir: runs/physical/kaist_hfrm
+  run_name: null
+  batch_size: 16
+  validation_batch_size: 1
+  num_workers: 8
+  pin_memory: true
+  devices: 1
+  max_steps: 20000
+  accumulate_grad_batches: 1
+  gradient_clip_val: 1.0
+  checkpoint_every_n_steps: 2000
+  val_check_interval: 1200
+  log_every_n_steps: 10
+  precision: bf16-mixed
+  gradient_checkpointing: false
+  optimizer:
+    type: AdamW
+    params:
+      lr: 0.0001
+      betas: [0.9, 0.999]
+      weight_decay: 0.01
+
+ema:
+  enabled: false
+
+validation:
+  num_inference_steps: 28
+  use_ema: false
+  save_images: true
+  compute_fid: true
+  fid_reference: source
+  fid_num_workers: 4
+  fid_batch_size: 8
+  keep_fid_images: false

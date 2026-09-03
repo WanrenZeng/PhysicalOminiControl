@@ -1,0 +1,70 @@
+vae:
+  path: /root/.cache/huggingface/hub/models--black-forest-labs--FLUX.1-dev/snapshots/3de623fc3c33e44ffbe2bad470d0f45bccf2eb21
+  sample_posterior: true
+
+model:
+  in_channels: 64
+  out_channels: 64
+  hidden_size: 768
+  num_attention_heads: 12
+  attention_head_dim: 64
+  num_layers: 33
+  mlp_ratio: 4.0
+  axes_dims_rope: [16, 24, 24]
+  theta: 10000
+
+hfrm:
+  base_dim: 96
+  pretrained_path: /root/zengpeiyi/work_base/OminiControl-main/runs_hfrm/wavelet_hfrm_channel_ll_l1msssim_flir_noise/20260530-113803/ckpt/10000/hfrm.pth
+
+dataset:
+  name: flir
+  root: /root/zengpeiyi/work_base/dataset/FLIR-align
+  train_annotations: /root/zengpeiyi/work_base/dataset/FLIR-align/annotations_train.json
+  validation_annotations: /root/zengpeiyi/work_base/dataset/FLIR-align/annotations_validation.json
+  horizontal_flip_prob: 0.5
+  train_num_samples: null
+  validation_num_samples: 100
+
+train:
+  stage: dit
+  output_dir: runs/physical/flir_dit
+  run_name: null
+  batch_size: 1
+  validation_batch_size: 1
+  num_workers: 8
+  pin_memory: true
+  devices: 1
+  max_steps: 200000
+  accumulate_grad_batches: 16
+  gradient_clip_val: 1.0
+  checkpoint_every_n_steps: 2000
+  val_check_interval: 5000
+  log_every_n_steps: 10
+  precision: bf16-mixed
+  gradient_checkpointing: true
+  optimizer:
+    type: AdamW
+    params:
+      lr: 0.0001
+      betas: [0.9, 0.95]
+      weight_decay: 0.01
+
+ema:
+  enabled: true
+  decay: 0.9999
+  update_after_step: 1000
+  use_warmup: true
+  inv_gamma: 1.0
+  power: 0.75
+
+validation:
+  num_inference_steps: 28
+  vae_sample_posterior: true
+  use_ema: true
+  save_images: true
+  compute_fid: true
+  fid_reference: source
+  fid_num_workers: 4
+  fid_batch_size: 8
+  keep_fid_images: false

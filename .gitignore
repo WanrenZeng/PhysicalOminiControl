@@ -1,0 +1,15 @@
+# Experiment outputs, run logs, and model weights (large, machine-generated)
+/runs/
+/checkpoints/
+
+# Agent session logs
+/sessions/
+
+# Python caches & build artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+
+# OS / editor
+.DS_Store
