@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import math
 from collections.abc import Iterator, Sequence
 from typing import Mapping
 
@@ -22,6 +23,7 @@ class PhysicalLightningModule(L.LightningModule):
         optimizer_config: Mapping[str, Any],
         ema_config: Mapping[str, Any] | None = None,
         hfrm_loss_config: Mapping[str, float] | None = None,
+        joint_loss_config: Mapping[str, Any] | None = None,
         validation_config: Mapping[str, Any] | None = None,
     ) -> None:
         super().__init__()
@@ -30,6 +32,7 @@ class PhysicalLightningModule(L.LightningModule):
         self.optimizer_config = dict(optimizer_config)
         self.ema_config = dict(ema_config or {})
         self.hfrm_loss_config = dict(hfrm_loss_config or {})
+        self.joint_loss_config = dict(joint_loss_config or {})
         self.validation_config = dict(validation_config or {})
         self.model.set_train_stage(self.stage)
         self._ema: ExponentialMovingAverage | None = None
@@ -38,11 +41,6 @@ class PhysicalLightningModule(L.LightningModule):
 
         if self.stage not in {"dit", "hfrm", "joint"}:
             raise ValueError("stage must be 'dit', 'hfrm', or 'joint'.")
-        if self.stage == "joint":
-            raise ValueError(
-                "Joint training is intentionally disabled until the LL sampler is configured. "
-                "Run the supported 'dit' and 'hfrm' stages separately first."
-            )
 
     @property
     def trainable_parameters(self) -> list[nn.Parameter]:
@@ -56,7 +54,7 @@ class PhysicalLightningModule(L.LightningModule):
 
     def setup(self, stage: str | None = None) -> None:
         self.model.set_vae_device(self.device)
-        if self.stage == "dit" and self.ema_config.get("enabled", True) and self._ema is None:
+        if self.stage in {"dit", "joint"} and self.ema_config.get("enabled", True) and self._ema is None:
             if self.model.dit is None:
                 raise RuntimeError("The DiT stage requires a model with include_dit=True.")
             self._ema = ExponentialMovingAverage(
@@ -68,9 +66,64 @@ class PhysicalLightningModule(L.LightningModule):
                 power=float(self.ema_config.get("power", 0.75)),
             )
 
+    def _current_teacher_forcing_prob(self) -> float:
+        """Teacher-forcing probability for the current optimizer step.
+
+        Supports a static value (``teacher_forcing_prob``) or an annealing
+        schedule that starts high and decays low, so the HFRM leans on the
+        ground-truth LL while the DiT is still inaccurate and gradually switches
+        to the DiT's own prediction. Annealing keys, when present, take
+        precedence:
+
+        * ``teacher_forcing_prob_start`` / ``teacher_forcing_prob_end``
+        * ``teacher_forcing_anneal_warmup``: steps to hold the start value
+        * ``teacher_forcing_anneal_steps``: steps over which to decay start->end
+        * ``teacher_forcing_schedule``: ``linear`` (default) or ``cosine``
+        """
+        cfg = self.joint_loss_config
+        start = cfg.get("teacher_forcing_prob_start")
+        end = cfg.get("teacher_forcing_prob_end")
+        if start is None or end is None:
+            return float(cfg.get("teacher_forcing_prob", 0.5))
+        start = float(start)
+        end = float(end)
+        warmup = int(cfg.get("teacher_forcing_anneal_warmup", 0))
+        anneal_steps = int(cfg.get("teacher_forcing_anneal_steps", 0))
+        step = int(self.global_step)
+        if step <= warmup:
+            return start
+        if anneal_steps <= 0:
+            return end
+        progress = (step - warmup) / anneal_steps
+        progress = min(max(progress, 0.0), 1.0)
+        if str(cfg.get("teacher_forcing_schedule", "linear")).lower() == "cosine":
+            fraction = 0.5 * (1.0 + math.cos(math.pi * progress))
+        else:
+            fraction = 1.0 - progress
+        return end + (start - end) * fraction
+
     def training_step(self, batch: Mapping[str, torch.Tensor], batch_idx: int) -> torch.Tensor:
         if self.stage == "dit":
             loss, logs = self.model.flow_matching_loss(batch)
+        elif self.stage == "joint":
+            teacher_forcing_prob = self._current_teacher_forcing_prob()
+            loss, logs = self.model.end_to_end_loss(
+                batch,
+                high_frequency_weight=float(self.joint_loss_config.get("high_frequency_weight", 0.5)),
+                pixel_weight=float(self.joint_loss_config.get("pixel_weight", 1.0)),
+                ms_ssim_weight=float(self.joint_loss_config.get("ms_ssim_weight", 0.0)),
+                flow_weight=float(self.joint_loss_config.get("flow_weight", 1.0)),
+                teacher_forcing_prob=teacher_forcing_prob,
+                teacher_noise_std=float(self.joint_loss_config.get("teacher_noise_std", 0.05)),
+            )
+            self.log(
+                "train/teacher_forcing_prob",
+                teacher_forcing_prob,
+                on_step=True,
+                on_epoch=False,
+                sync_dist=False,
+                batch_size=batch["visible"].shape[0],
+            )
         else:
             loss, logs = self.model.hfrm_loss(
                 batch,
@@ -155,6 +208,44 @@ class PhysicalLightningModule(L.LightningModule):
             batch["sample_id"],
             target_source_paths=batch.get("infrared_path"),
         )
+        self._log_validation_images(dataloader_idx, batch, reconstructed)
+
+    def _log_validation_images(
+        self, dataloader_idx: int, batch: Mapping[str, torch.Tensor], reconstructed: torch.Tensor
+    ) -> None:
+        """Write a few visible|predicted|target panels to TensorBoard on rank 0.
+
+        Gated by ``validation.tensorboard_images`` (default true) and limited to
+        ``validation.tensorboard_image_count`` samples (default 4). All tensors
+        are RGB in ``[0, 1]`` and share the same spatial size, so they are
+        concatenated along width into a single comparison strip.
+        """
+        if not bool(self.validation_config.get("tensorboard_images", True)):
+            return
+        if self.logger is None or self.global_rank != 0:
+            return
+        experiment = getattr(self.logger, "experiment", None)
+        if experiment is None or not hasattr(experiment, "add_image"):
+            return
+        count = int(self.validation_config.get("tensorboard_image_count", 4))
+        count = max(0, min(count, int(reconstructed.shape[0])))
+        target = batch["infrared"]
+        visible = batch.get("visible")
+        for index in range(count):
+            panels = []
+            if visible is not None:
+                panels.append(visible[index])
+            panels.append(reconstructed[index])
+            panels.append(target[index])
+            grid = torch.cat(
+                [panel.detach().float().clamp(0, 1).cpu() for panel in panels], dim=2
+            )
+            experiment.add_image(
+                f"val/{dataloader_idx}/sample_{index}",
+                grid,
+                global_step=self.global_step,
+                dataformats="CHW",
+            )
 
     def on_validation_epoch_end(self) -> None:
         for index, metrics in enumerate(self._validation_metrics):

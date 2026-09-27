@@ -219,6 +219,109 @@ class PhysicalTrainingModel(nn.Module):
             "hfrm_ms_ssim_loss": ms_ssim_loss.detach(),
         }
 
+    def end_to_end_loss(
+        self,
+        batch: Mapping[str, torch.Tensor],
+        *,
+        high_frequency_weight: float = 0.5,
+        pixel_weight: float = 1.0,
+        ms_ssim_weight: float = 0.0,
+        flow_weight: float = 1.0,
+        teacher_forcing_prob: float = 0.5,
+        teacher_noise_std: float = 0.05,
+        generator: torch.Generator | None = None,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        """End-to-end visible-to-infrared loss coupling the DiT and the HFRM.
+
+        The DiT is trained by flow matching on infrared LL tokens. Its one-step
+        clean estimate ``x0 = x_t - t * v`` is decoded back to an infrared LL
+        image and handed to the HFRM, which predicts the infrared high-frequency
+        bands from that LL plus the visible high frequencies; IDMT reconstructs
+        the final infrared image.
+
+        Two decoupling rules keep the branches independent:
+
+        * The decoded DiT prediction is detached, so the reconstruction loss
+          never back-propagates into the DiT.
+        * Teacher forcing replaces the DiT LL with the ground-truth infrared LL
+          (perturbed by Gaussian noise) for a random subset of samples, so the
+          HFRM keeps receiving a usable LL while the DiT is still inaccurate and
+          does not overfit perfectly clean coefficients.
+        """
+        if self.dit is None or self.vae is None:
+            raise RuntimeError("End-to-end training requires include_dit=True.")
+        components = self._wavelet_components(batch)
+        visible_tokens, infrared_tokens, latent_shape = self.encode_ll_pair(
+            components["visible_ll"], components["infrared_ll"]
+        )
+        batch_size = infrared_tokens.shape[0]
+        device = infrared_tokens.device
+        times = logistic_normal_timesteps(batch_size, device=device, generator=generator)
+        noise = torch.randn_like(infrared_tokens)
+        noisy_tokens = (1 - times[:, None, None]) * infrared_tokens + times[:, None, None] * noise
+        target_velocity = noise - infrared_tokens
+        image_ids = prepare_flux_ids(*latent_shape, device=device)
+        predicted_velocity = self.dit(
+            noisy_tokens, visible_tokens, times, image_ids=image_ids
+        )
+        flow_loss = F.mse_loss(predicted_velocity.float(), target_velocity.float())
+
+        # One-step clean LL estimate, fully detached from the DiT graph.
+        with torch.no_grad():
+            predicted_ll_tokens = noisy_tokens - times[:, None, None] * predicted_velocity.detach()
+            predicted_infrared_ll = self.decode_ir_ll_tokens(predicted_ll_tokens, latent_shape)
+
+        # Teacher forcing: per-sample substitution of the ground-truth LL, with
+        # optional Gaussian noise to avoid overfitting clean coefficients.
+        ground_truth_ll = components["infrared_ll"]
+        if teacher_forcing_prob > 0.0:
+            teacher_mask = (
+                torch.rand(batch_size, 1, 1, 1, device=device, generator=generator)
+                < teacher_forcing_prob
+            )
+            teacher_ll = ground_truth_ll
+            if teacher_noise_std > 0.0:
+                teacher_ll = teacher_ll + teacher_noise_std * torch.randn_like(ground_truth_ll)
+            ll_input = torch.where(teacher_mask, teacher_ll, predicted_infrared_ll)
+            teacher_fraction = teacher_mask.to(flow_loss.dtype).mean().detach()
+        else:
+            ll_input = predicted_infrared_ll
+            teacher_fraction = flow_loss.new_zeros(())
+
+        predicted_high = self.hfrm(ll_input, components["visible_high"])
+        reconstructed = self.reconstructor.idmt(torch.cat((ll_input, predicted_high), dim=1))
+        high_loss = F.l1_loss(predicted_high.float(), components["infrared_high"].float())
+        pixel_loss = F.l1_loss(reconstructed.float(), components["infrared"].float())
+        ms_ssim_loss = reconstructed.new_zeros(())
+        if ms_ssim_weight:
+            try:
+                from pytorch_msssim import ms_ssim
+            except ImportError as error:
+                raise ImportError(
+                    "MS-SSIM loss requires `pytorch-msssim`; install it before enabling ms_ssim_weight."
+                ) from error
+            ms_ssim_loss = 1 - ms_ssim(
+                inverse_data_transform(reconstructed).float(),
+                inverse_data_transform(components["infrared"]).float(),
+                data_range=1.0,
+                size_average=True,
+            )
+        reconstruction_loss = (
+            high_frequency_weight * high_loss
+            + pixel_weight * pixel_loss
+            + ms_ssim_weight * ms_ssim_loss
+        )
+        loss = flow_weight * flow_loss + reconstruction_loss
+        return loss, {
+            "flow_loss": flow_loss.detach(),
+            "recon_loss": reconstruction_loss.detach(),
+            "hfrm_high_loss": high_loss.detach(),
+            "hfrm_pixel_loss": pixel_loss.detach(),
+            "hfrm_ms_ssim_loss": ms_ssim_loss.detach(),
+            "teacher_forcing_frac": teacher_fraction,
+            "time_mean": times.detach().mean(),
+        }
+
     @torch.no_grad()
     def encode_visible_ll(self, visible: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, tuple[int, int]]:
         if self.dit is None:

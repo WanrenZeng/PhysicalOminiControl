@@ -13,9 +13,29 @@ model:
   axes_dims_rope: [16, 24, 24]
   theta: 10000
 
+# End-to-end (joint) stage trains the DiT and the HFRM from scratch together, so
+# no pretrained HFRM checkpoint is required. Provide pretrained_path only to warm
+# start the HFRM from an existing run.
 hfrm:
   base_dim: 96
-  pretrained_path: /root/zengpeiyi/work_base/OminiControl-main/runs_hfrm/wavelet_hfrm_channel_ll_l1msssim_kaist_noise/20260530-154646/ckpt/19800/hfrm.pth
+  pretrained_path: null
+
+# End-to-end coupling between the DiT and the HFRM. Teacher-forcing annealing
+# starts high and decays low: the HFRM leans on the ground-truth LL early, then
+# gradually switches to the DiT's own (detached) prediction. The *_start/_end
+# keys take precedence over the static teacher_forcing_prob.
+joint:
+  flow_weight: 1.0
+  teacher_forcing_prob: 0.5
+  teacher_forcing_prob_start: 1.0
+  teacher_forcing_prob_end: 0.0
+  teacher_forcing_anneal_warmup: 0
+  teacher_forcing_anneal_steps: 100000
+  teacher_forcing_schedule: linear
+  teacher_noise_std: 0.05
+  high_frequency_weight: 0.5
+  pixel_weight: 1.0
+  ms_ssim_weight: 0.0
 
 dataset:
   name: kaist
@@ -27,20 +47,21 @@ dataset:
   validation_num_samples: 100
 
 train:
-  stage: dit
-  output_dir: runs/physical/kaist_dit
+  stage: joint
+  output_dir: runs/physical/kaist_joint
   run_name: null
-  batch_size: 1
+  batch_size: 8
   validation_batch_size: 1
   num_workers: 8
   pin_memory: true
   devices: 1
   max_steps: 200000
-  accumulate_grad_batches: 16
+  accumulate_grad_batches: 2
   gradient_clip_val: 1.0
-  checkpoint_every_n_steps: 2000
-  val_check_interval: 5000
-  log_every_n_steps: 10
+  checkpoint_every_n_steps: 10000
+  val_check_interval: 10000
+  log_every_n_steps: 100
+  tensorboard: true
   precision: bf16-mixed
   gradient_checkpointing: true
   optimizer:
@@ -63,6 +84,8 @@ validation:
   vae_sample_posterior: true
   use_ema: true
   save_images: true
+  tensorboard_images: true
+  tensorboard_image_count: 4
   compute_fid: true
   fid_reference: source
   fid_num_workers: 4

@@ -1,0 +1,103 @@
+vae:
+  path: checkpoints/vae
+  sample_posterior: true
+
+model:
+  in_channels: 64
+  out_channels: 64
+  hidden_size: 768
+  num_attention_heads: 12
+  attention_head_dim: 64
+  num_layers: 33
+  mlp_ratio: 4.0
+  axes_dims_rope: [16, 24, 24]
+  theta: 10000
+
+# End-to-end (joint) stage trains the DiT and the HFRM from scratch together, so
+# no pretrained HFRM checkpoint is required. Provide pretrained_path only to warm
+# start the HFRM from an existing run.
+hfrm:
+  base_dim: 96
+  pretrained_path: null
+
+# End-to-end coupling between the DiT and the HFRM:
+#   flow_weight           weight of the DiT flow-matching loss
+#   teacher_noise_std     Gaussian noise added to the ground-truth LL during
+#                         teacher forcing, to avoid overfitting clean coefficients
+#   high_frequency_weight / pixel_weight / ms_ssim_weight  HFRM reconstruction terms
+#
+# Teacher-forcing annealing (start high -> end low over training). While the
+# *_start/_end keys are present they take precedence over the static
+# teacher_forcing_prob. The HFRM leans on the ground-truth LL early, then
+# gradually switches to the DiT's own (detached) prediction.
+#   teacher_forcing_prob_start / _end   probability endpoints
+#   teacher_forcing_anneal_warmup       optimizer steps to hold the start value
+#   teacher_forcing_anneal_steps        optimizer steps to decay start -> end
+#   teacher_forcing_schedule            linear (default) or cosine
+joint:
+  flow_weight: 1.0
+  teacher_forcing_prob: 0.5
+  teacher_forcing_prob_start: 1.0
+  teacher_forcing_prob_end: 0.0
+  teacher_forcing_anneal_warmup: 0
+  teacher_forcing_anneal_steps: 100000
+  teacher_forcing_schedule: linear
+  teacher_noise_std: 0.05
+  high_frequency_weight: 0.5
+  pixel_weight: 1.0
+  ms_ssim_weight: 0.0
+
+dataset:
+  name: flir
+  root: ../datasets/FLIR-align
+  train_annotations: ../datasets/FLIR-align/annotations_train.json
+  validation_annotations: ../datasets/FLIR-align/annotations_validation.json
+  horizontal_flip_prob: 0.5
+  train_num_samples: null
+  validation_num_samples: 100
+
+train:
+  stage: joint
+  output_dir: runs/physical/flir_joint
+  run_name: null
+  batch_size: 8
+  validation_batch_size: 1
+  num_workers: 8
+  pin_memory: true
+  devices: 2
+  max_steps: 200000
+  accumulate_grad_batches: 1
+  gradient_clip_val: 1.0
+  checkpoint_every_n_steps: 10000
+  val_check_interval: 10000
+  log_every_n_steps: 100
+  tensorboard: true
+  precision: bf16-mixed
+  gradient_checkpointing: true
+  optimizer:
+    type: AdamW
+    params:
+      lr: 0.0001
+      betas: [0.9, 0.95]
+      weight_decay: 0.01
+
+ema:
+  enabled: true
+  decay: 0.9999
+  update_after_step: 1000
+  use_warmup: true
+  inv_gamma: 1.0
+  power: 0.75
+
+validation:
+  num_inference_steps: 28
+  vae_sample_posterior: true
+  use_ema: true
+  save_images: true
+  tensorboard_images: true
+  tensorboard_image_count: 4
+  compute_fid: true
+  fid_reference: source
+  fid_num_workers: 4
+  fid_batch_size: 8
+  keep_fid_images: false

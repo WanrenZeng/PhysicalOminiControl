@@ -47,8 +47,23 @@ class ExponentialMovingAverage:
         self.optimization_step += 1
         decay = self._current_decay()
         one_minus_decay = 1 - decay
-        for shadow_parameter, parameter in zip(self.shadow_params, parameters):
-            shadow_parameter.sub_(one_minus_decay * (shadow_parameter - parameter.detach()))
+        for index, (shadow_parameter, parameter) in enumerate(
+            zip(self.shadow_params, parameters)
+        ):
+            current = parameter.detach()
+            # Shadow params are cloned at construction time (possibly on CPU,
+            # before the module is moved to the accelerator) or restored from a
+            # CPU checkpoint. Align them lazily to the live parameter so the
+            # in-place update never mixes devices/dtypes.
+            if (
+                shadow_parameter.device != current.device
+                or shadow_parameter.dtype != current.dtype
+            ):
+                shadow_parameter = shadow_parameter.to(
+                    device=current.device, dtype=current.dtype
+                )
+                self.shadow_params[index] = shadow_parameter
+            shadow_parameter.sub_(one_minus_decay * (shadow_parameter - current))
 
     @torch.no_grad()
     def copy_to(self, parameters: Iterable[torch.nn.Parameter]) -> None:

@@ -10,6 +10,7 @@ import lightning as L
 import torch
 import yaml
 from lightning.pytorch.callbacks import ModelCheckpoint
+from lightning.pytorch.loggers import TensorBoardLogger
 
 from .datamodule import PhysicalDataModule
 from .flux_dit import PhysicalFluxDiTConfig
@@ -36,7 +37,7 @@ def _build_model(config: dict[str, Any]) -> PhysicalTrainingModel:
     stage = str(config["train"]["stage"]).lower()
     model_config = config["model"]
     hfrm_config = config.get("hfrm", {})
-    include_dit = stage == "dit"
+    include_dit = stage in {"dit", "joint"}
     dit_config = PhysicalFluxDiTConfig(**model_config) if include_dit else None
     model = PhysicalTrainingModel(
         vae_path=config["vae"]["path"],
@@ -80,6 +81,7 @@ def main() -> None:
         optimizer_config=train_config["optimizer"],
         ema_config=config.get("ema"),
         hfrm_loss_config=config.get("hfrm_loss"),
+        joint_loss_config=config.get("joint"),
         validation_config=config.get("validation"),
     )
 
@@ -113,6 +115,18 @@ def main() -> None:
     ]
     strategy = "ddp" if int(os.environ.get("WORLD_SIZE", "1")) > 1 else "auto"
 
+    # TensorBoard logging. All loss scalars are already emitted via self.log in
+    # the Lightning module; `log_every_n_steps` (config) sets their recording
+    # frequency. Set train.tensorboard=false to disable the logger entirely.
+    if bool(train_config.get("tensorboard", True)):
+        logger: object = TensorBoardLogger(
+            save_dir=run_directory,
+            name="tensorboard",
+            default_hp_metric=False,
+        )
+    else:
+        logger = False
+
     trainer = L.Trainer(
         accelerator="gpu" if torch.cuda.is_available() else "cpu",
         devices=int(train_config.get("devices", 1)),
@@ -125,7 +139,7 @@ def main() -> None:
         val_check_interval=int(train_config.get("val_check_interval", 1000)) if validation_enabled else None,
         limit_val_batches=1.0 if validation_enabled else 0,
         num_sanity_val_steps=0,
-        logger=False,
+        logger=logger,
         enable_checkpointing=True,
         callbacks=callbacks,
         use_distributed_sampler=False,
